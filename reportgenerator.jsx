@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { Download, LayoutTemplate, FileCode2, Eye, Activity, DollarSign, LayoutDashboard, UploadCloud, Loader2 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 const NUMERIC_FIELDS = new Set([
   'totalRevenue',
@@ -22,8 +23,76 @@ const NUMERIC_FIELDS = new Set([
 const SCORE_FIELDS = new Set(['revenueCoverage', 'funnelCoverage', 'widgetUtilization']);
 const TEXT_FIELDS = new Set(['storeName', 'optimizationPercent', 'widget1Name', 'widget2Name', 'widget3Name']);
 const MAX_UPLOAD_FILE_BYTES = 8 * 1024 * 1024;
+const EXCEL_ACCEPT_TYPES = '.xlsx,.xls,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel';
+
+const EXCEL_HEADER_ALIASES = {
+  storeName: ['store name', 'store', 'shop name', 'shop'],
+  optimizationPercent: ['optimization percent', 'optimization coverage', 'optimization', 'coverage percent'],
+  totalRevenue: ['total revenue', 'revenue', 'total wiser revenue', 'wiser revenue'],
+  revenueCoverage: ['revenue coverage'],
+  funnelCoverage: ['funnel coverage'],
+  widgetUtilization: ['widget utilization'],
+  productRev: ['product rev', 'product page', 'product page revenue', 'product revenue'],
+  postPurchaseRev: ['post purchase rev', 'post purchase', 'post-purchase', 'post purchase revenue'],
+  checkoutRev: ['checkout rev', 'checkout', 'checkout revenue'],
+  thankYouRev: ['thank you rev', 'thank you', 'thankyou', 'thank you revenue'],
+  cartRev: ['cart rev', 'cart', 'cart revenue'],
+  otherRev: ['other rev', 'other', 'others', 'other revenue'],
+  widget1Name: ['widget 1 name', 'top widget 1 name', 'first widget name'],
+  widget1Rev: ['widget 1 rev', 'widget 1 revenue', 'top widget 1 revenue', 'first widget revenue'],
+  widget2Name: ['widget 2 name', 'top widget 2 name', 'second widget name'],
+  widget2Rev: ['widget 2 rev', 'widget 2 revenue', 'top widget 2 revenue', 'second widget revenue'],
+  widget3Name: ['widget 3 name', 'top widget 3 name', 'third widget name'],
+  widget3Rev: ['widget 3 rev', 'widget 3 revenue', 'top widget 3 revenue', 'third widget revenue'],
+  projectedCurrent: ['projected current', 'current monthly', 'current projection'],
+  projectedOptimized: ['projected optimized', 'with optimization', 'optimized projection']
+};
+
+const normalizeHeaderKey = value =>
+  String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+
+const EXCEL_FIELD_LOOKUP = (() => {
+  const lookup = new Map();
+
+  for (const [field, labels] of Object.entries(EXCEL_HEADER_ALIASES)) {
+    lookup.set(normalizeHeaderKey(field), field);
+    for (const label of labels) {
+      lookup.set(normalizeHeaderKey(label), field);
+    }
+  }
+
+  return lookup;
+})();
 
 const toSafeNumber = (value, fallback = 0) => {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return fallback;
+
+    let normalized = trimmed
+      .replace(/\$/g, '')
+      .replace(/,/g, '')
+      .replace(/%/g, '')
+      .replace(/\s+/g, '');
+
+    if (/^\(.*\)$/.test(normalized)) {
+      normalized = `-${normalized.slice(1, -1)}`;
+    }
+
+    const stringParsed = Number(normalized);
+    if (Number.isFinite(stringParsed)) return stringParsed;
+
+    const matchedNumber = normalized.match(/-?\d+(\.\d+)?/);
+    if (matchedNumber) {
+      const extracted = Number(matchedNumber[0]);
+      return Number.isFinite(extracted) ? extracted : fallback;
+    }
+
+    return fallback;
+  }
+
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
@@ -91,6 +160,40 @@ const normalizeReportData = (input = {}) => {
   };
 };
 
+const extractExcelData = worksheet => {
+  const mappedData = {};
+
+  const rowObjects = XLSX.utils.sheet_to_json(worksheet, { defval: '', raw: false });
+  for (const row of rowObjects) {
+    const rowMatch = {};
+
+    for (const [header, value] of Object.entries(row)) {
+      const field = EXCEL_FIELD_LOOKUP.get(normalizeHeaderKey(header));
+      if (field && value !== '') {
+        rowMatch[field] = value;
+      }
+    }
+
+    if (Object.keys(rowMatch).length > 0) {
+      Object.assign(mappedData, rowMatch);
+      break;
+    }
+  }
+
+  const matrixRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '', raw: false });
+  for (const row of matrixRows) {
+    if (!Array.isArray(row) || row.length < 2) continue;
+
+    const field = EXCEL_FIELD_LOOKUP.get(normalizeHeaderKey(row[0]));
+    const value = row[1];
+    if (field && value !== '' && !Object.prototype.hasOwnProperty.call(mappedData, field)) {
+      mappedData[field] = value;
+    }
+  }
+
+  return mappedData;
+};
+
 const ReportGenerator = () => {
   // --- State for the Report Data ---
   const [data, setData] = useState({
@@ -125,8 +228,10 @@ const ReportGenerator = () => {
   });
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isParsingSpreadsheet, setIsParsingSpreadsheet] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const fileInputRef = useRef(null);
+  const spreadsheetInputRef = useRef(null);
 
   const handleImageUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -243,6 +348,49 @@ IMPORTANT:
       if (fileInputRef.current) fileInputRef.current.value = "";
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleSpreadsheetUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+      setErrorMsg(
+        `Spreadsheet is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Please use a file under 8 MB.`
+      );
+      if (spreadsheetInputRef.current) spreadsheetInputRef.current.value = "";
+      return;
+    }
+
+    setIsParsingSpreadsheet(true);
+    setErrorMsg("");
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+      const firstSheetName = workbook.SheetNames?.[0];
+      if (!firstSheetName) {
+        throw new Error('The spreadsheet has no sheets.');
+      }
+
+      const worksheet = workbook.Sheets[firstSheetName];
+      const extractedData = extractExcelData(worksheet);
+      const normalizedData = normalizeIncomingData(extractedData);
+      if (Object.keys(normalizedData).length === 0) {
+        throw new Error('Could not map spreadsheet columns to report fields.');
+      }
+
+      setData(prev => ({ ...prev, ...normalizedData }));
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error && err.message
+          ? err.message
+          : "Failed to read spreadsheet. Please check the file format."
+      );
+    } finally {
+      setIsParsingSpreadsheet(false);
+      if (spreadsheetInputRef.current) spreadsheetInputRef.current.value = "";
+    }
   };
 
   const handleInputChange = (e) => {
@@ -733,6 +881,33 @@ IMPORTANT:
                 )}
               </label>
               {errorMsg && <p className="mt-2 text-xs text-red-600">{errorMsg}</p>}
+            </section>
+
+            {/* Spreadsheet Upload */}
+            <section className="bg-green-50 p-4 rounded-lg border border-green-100">
+              <h3 className="text-sm font-bold text-green-900 mb-2 flex items-center">
+                <UploadCloud className="w-4 h-4 mr-2 text-green-600" /> Auto-Fill via Excel
+              </h3>
+              <p className="text-xs text-green-700 mb-3">Upload a spreadsheet with matching column names or key/value rows for report fields.</p>
+
+              <input
+                type="file"
+                accept={EXCEL_ACCEPT_TYPES}
+                onChange={handleSpreadsheetUpload}
+                ref={spreadsheetInputRef}
+                className="hidden"
+                id="spreadsheet-upload"
+              />
+              <label
+                htmlFor="spreadsheet-upload"
+                className={`flex items-center justify-center w-full px-4 py-2 text-sm font-medium rounded-md border border-green-300 shadow-sm cursor-pointer transition-colors ${isParsingSpreadsheet ? 'bg-green-200 text-green-800' : 'bg-white text-green-700 hover:bg-green-100'}`}
+              >
+                {isParsingSpreadsheet ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reading Spreadsheet...</>
+                ) : (
+                  <><UploadCloud className="w-4 h-4 mr-2" /> Select Excel/CSV</>
+                )}
+              </label>
             </section>
 
             {/* General Settings */}
