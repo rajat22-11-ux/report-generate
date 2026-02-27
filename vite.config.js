@@ -166,7 +166,13 @@ const createDashboardApiPlugin = env => {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
+  const renderHostname = env.RENDER_EXTERNAL_HOSTNAME || process.env.RENDER_EXTERNAL_HOSTNAME;
+  const previewAllowedHosts = renderHostname ? [renderHostname] : ['.onrender.com'];
+
   return {
-    plugins: [react(), createDashboardApiPlugin(env)]
+    plugins: [react(), createDashboardApiPlugin(env)],
+    preview: {
+      allowedHosts: previewAllowedHosts
+    }
   };
 });
