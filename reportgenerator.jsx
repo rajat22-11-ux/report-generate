@@ -1,0 +1,830 @@
+import React, { useState, useMemo, useRef } from 'react';
+import { Download, LayoutTemplate, FileCode2, Eye, Activity, DollarSign, LayoutDashboard, UploadCloud, Loader2 } from 'lucide-react';
+
+const NUMERIC_FIELDS = new Set([
+  'totalRevenue',
+  'revenueCoverage',
+  'funnelCoverage',
+  'widgetUtilization',
+  'productRev',
+  'postPurchaseRev',
+  'checkoutRev',
+  'thankYouRev',
+  'cartRev',
+  'otherRev',
+  'widget1Rev',
+  'widget2Rev',
+  'widget3Rev',
+  'projectedCurrent',
+  'projectedOptimized'
+]);
+
+const SCORE_FIELDS = new Set(['revenueCoverage', 'funnelCoverage', 'widgetUtilization']);
+const TEXT_FIELDS = new Set(['storeName', 'optimizationPercent', 'widget1Name', 'widget2Name', 'widget3Name']);
+const MAX_UPLOAD_FILE_BYTES = 8 * 1024 * 1024;
+
+const toSafeNumber = (value, fallback = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const sanitizeText = (value, fallback = '') => {
+  const text = String(value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/[<>&]/g, '')
+    .trim();
+  return text || fallback;
+};
+
+const DEFAULT_NORMALIZED_DATA = {
+  storeName: 'Unknown',
+  optimizationPercent: '',
+  totalRevenue: 0,
+  revenueCoverage: 0,
+  funnelCoverage: 0,
+  widgetUtilization: 0,
+  productRev: 0,
+  postPurchaseRev: 0,
+  checkoutRev: 0,
+  thankYouRev: 0,
+  cartRev: 0,
+  otherRev: 0,
+  widget1Name: '',
+  widget1Rev: 0,
+  widget2Name: '',
+  widget2Rev: 0,
+  widget3Name: '',
+  widget3Rev: 0,
+  projectedCurrent: 0,
+  projectedOptimized: 0
+};
+
+const normalizeIncomingData = (input = {}) => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return {};
+  }
+
+  const normalized = {};
+
+  for (const field of TEXT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(input, field)) {
+      normalized[field] = sanitizeText(input[field], field === 'storeName' ? 'Unknown' : '');
+    }
+  }
+
+  for (const field of NUMERIC_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(input, field)) {
+      const value = toSafeNumber(input[field], 0);
+      normalized[field] = SCORE_FIELDS.has(field) ? clamp(value, 0, 100) : value;
+    }
+  }
+
+  return normalized;
+};
+
+const normalizeReportData = (input = {}) => {
+  return {
+    ...DEFAULT_NORMALIZED_DATA,
+    ...normalizeIncomingData(input)
+  };
+};
+
+const ReportGenerator = () => {
+  // --- State for the Report Data ---
+  const [data, setData] = useState({
+    storeName: 'Wooden Ships',
+    optimizationPercent: '60-65',
+    totalRevenue: 31371.00,
+    
+    // Health Scores
+    revenueCoverage: 65,
+    funnelCoverage: 55,
+    widgetUtilization: 50,
+    
+    // Revenue by Page
+    productRev: 24498.91,
+    postPurchaseRev: 5145.00,
+    checkoutRev: 862.85,
+    thankYouRev: 450.00,
+    cartRev: 149.00,
+    otherRev: 265.24,
+    
+    // Top Widgets
+    widget1Name: 'Related Products',
+    widget1Rev: 20163.21,
+    widget2Name: 'Inspired by Your Views',
+    widget2Rev: 3311.90,
+    widget3Name: 'Top Selling Products',
+    widget3Rev: 1438.00,
+    
+    // Projections
+    projectedCurrent: 15685,
+    projectedOptimized: 23685
+  });
+
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+  const fileInputRef = useRef(null);
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+      setErrorMsg(
+        `Image is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Please use an image under 8 MB.`
+      );
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setErrorMsg("");
+
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      try {
+        const fileData = typeof reader.result === 'string' ? reader.result : '';
+        const base64Data = fileData.includes(',') ? fileData.split(',')[1] : '';
+        if (!base64Data) {
+          throw new Error('Invalid image data');
+        }
+
+        const mimeType = file.type || 'image/png';
+        const prompt = `Analyze this analytics dashboard screenshot. Extract the data and return a JSON object.
+Use EXACTLY these keys:
+- storeName (string)
+- optimizationPercent (string, e.g. "60-65")
+- totalRevenue (number)
+- revenueCoverage (number 0-100)
+- funnelCoverage (number 0-100)
+- widgetUtilization (number 0-100)
+- productRev (number)
+- postPurchaseRev (number)
+- checkoutRev (number)
+- thankYouRev (number)
+- cartRev (number)
+- otherRev (number)
+- widget1Name (string)
+- widget1Rev (number)
+- widget2Name (string)
+- widget2Rev (number)
+- widget3Name (string)
+- widget3Rev (number)
+- projectedCurrent (number)
+- projectedOptimized (number)
+
+IMPORTANT:
+1. If a specific value is missing from the image, make your best reasonable guess based on the visible data, or default to 0 for numbers and "Unknown" for strings.`;
+
+        // Route through a backend endpoint to keep API keys off the client.
+        const payload = { prompt, mimeType, imageBase64: base64Data };
+        const delays = [1000, 2000, 4000, 8000, 16000];
+        const maxAttempts = delays.length + 1;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            const response = await fetch('/api/analyze-dashboard', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            let result = {};
+            try {
+              result = await response.json();
+            } catch {
+              result = {};
+            }
+
+            if (!response.ok) {
+              const apiError = typeof result?.error === 'string' ? result.error : `HTTP error ${response.status}`;
+              throw new Error(apiError);
+            }
+
+            const extractedData =
+              result?.extractedData ??
+              result?.data ??
+              (result?.candidates?.[0]?.content?.parts?.[0]?.text
+                ? JSON.parse(result.candidates[0].content.parts[0].text)
+                : result);
+
+            const normalizedExtractedData = normalizeIncomingData(extractedData);
+            if (Object.keys(normalizedExtractedData).length === 0) {
+              throw new Error('Invalid analysis response');
+            }
+
+            setData(prev => ({ ...prev, ...normalizedExtractedData }));
+            return;
+          } catch (err) {
+            const isLastAttempt = attempt === maxAttempts - 1;
+            if (isLastAttempt) {
+              setErrorMsg(
+                err instanceof Error && err.message
+                  ? err.message
+                  : "Failed to analyze image. Please try again or fill the fields manually."
+              );
+            } else {
+              await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+            }
+          }
+        }
+      } catch (err) {
+        setErrorMsg("Unable to read the uploaded image. Please try another file.");
+      } finally {
+        setIsAnalyzing(false);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    };
+    reader.onerror = () => {
+      setErrorMsg("Unable to read the uploaded image. Please try another file.");
+      setIsAnalyzing(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setData(prev => {
+      if (NUMERIC_FIELDS.has(name)) {
+        if (value === '') return { ...prev, [name]: '' };
+        const parsed = Number(value);
+        return { ...prev, [name]: Number.isFinite(parsed) ? parsed : prev[name] };
+      }
+
+      if (TEXT_FIELDS.has(name)) {
+        return { ...prev, [name]: sanitizeText(value) };
+      }
+
+      return { ...prev, [name]: value };
+    });
+  };
+
+  // --- HTML Template Builder ---
+  const generateHTML = useMemo(() => {
+    const safeData = normalizeReportData(data);
+
+    // Calculate Percentages
+    const revenueBase = safeData.totalRevenue > 0 ? safeData.totalRevenue : 0;
+    const w1Pct = (revenueBase > 0 ? clamp((safeData.widget1Rev / revenueBase) * 100, 0, 100) : 0).toFixed(1);
+    const w2Pct = (revenueBase > 0 ? clamp((safeData.widget2Rev / revenueBase) * 100, 0, 100) : 0).toFixed(1);
+    const w3Pct = (revenueBase > 0 ? clamp((safeData.widget3Rev / revenueBase) * 100, 0, 100) : 0).toFixed(1);
+    const revenueDataLiteral = [
+      safeData.productRev,
+      safeData.postPurchaseRev,
+      safeData.checkoutRev,
+      safeData.thankYouRev,
+      safeData.cartRev,
+      safeData.otherRev
+    ].join(', ');
+    const widgetDataLiteral = [safeData.widget1Rev, safeData.widget2Rev, safeData.widget3Rev].join(', ');
+    const widgetLabelLiteral = [safeData.widget1Name, safeData.widget2Name, safeData.widget3Name]
+      .map(label => JSON.stringify(label))
+      .join(', ');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wiser Performance Review: ${safeData.storeName}</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'wiser-red': '#F9423A',
+                        'wiser-navy': '#1F2937',
+                        'wiser-dark': '#111827',
+                        'wiser-gray': '#F6F6F7',
+                        'wiser-border': '#E1E3E5',
+                        'wiser-green': '#008060',
+                        'wiser-yellow': '#FFC453',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'San Francisco', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'sans-serif'],
+                    },
+                    boxShadow: {
+                        'card': '0 2px 5px rgba(0,0,0,0.05)',
+                        'hover': '0 5px 15px rgba(0,0,0,0.08)',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background-color: #F6F6F7; color: #1F2937; }
+        .chart-container { position: relative; width: 100%; max-width: 600px; margin-left: auto; margin-right: auto; height: 300px; max-height: 400px; }
+        @media (min-width: 768px) { .chart-container { height: 350px; } }
+        .metric-card { background: white; border: 1px solid #E1E3E5; border-radius: 8px; transition: all 0.2s ease; }
+        .metric-card:hover { border-color: #F9423A; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .tab-content { display: none; animation: fadeIn 0.3s ease-out; }
+        .tab-content.active { display: block; }
+        .tab-btn { position: relative; color: #6B7280; font-weight: 500; padding-bottom: 12px; transition: color 0.2s; }
+        .tab-btn:hover { color: #F9423A; }
+        .tab-btn.active { color: #F9423A; font-weight: 600; }
+        .tab-btn.active::after { content: ''; position: absolute; bottom: 0; left: 0; width: 100%; height: 3px; background-color: #F9423A; border-top-left-radius: 3px; border-top-right-radius: 3px; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .progress-bg { background-color: #F1F2F3; border-radius: 4px; height: 8px; width: 100%; overflow: hidden; }
+        .progress-fill { height: 100%; border-radius: 4px; transition: width 1s ease-in-out; }
+    </style>
+</head>
+<body class="font-sans antialiased pb-20 flex flex-col min-h-screen">
+    <header class="bg-white border-b border-wiser-border sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex flex-col md:flex-row justify-between items-center py-4">
+                <div class="flex items-center space-x-3">
+                    <div class="h-8 w-8 bg-wiser-red rounded flex items-center justify-center text-white font-bold text-xl">${safeData.storeName.charAt(0) || '?'}</div>
+                    <div>
+                        <h1 class="text-xl font-bold text-wiser-navy leading-tight">Performance Review</h1>
+                        <p class="text-xs text-gray-500">Store: <span class="font-semibold">${safeData.storeName}</span> | Optimization: <span class="text-wiser-green font-medium">${safeData.optimizationPercent}%</span></p>
+                    </div>
+                </div>
+                <div class="mt-4 md:mt-0 flex items-center space-x-6">
+                    <div class="text-right">
+                        <div class="text-xs text-gray-500 uppercase tracking-wide">Total Wiser Revenue</div>
+                        <div class="text-2xl font-bold text-wiser-navy">$${safeData.totalRevenue.toLocaleString()}+</div>
+                    </div>
+                    <div class="px-3 py-1 bg-green-50 text-wiser-green border border-green-200 text-xs font-bold rounded-full flex items-center">
+                        <span class="w-2 h-2 bg-wiser-green rounded-full mr-2"></span> GROWING
+                    </div>
+                </div>
+            </div>
+            <div class="flex space-x-8 mt-4 overflow-x-auto no-scrollbar border-t border-gray-100 pt-1">
+                <button onclick="switchTab('overview')" class="tab-btn active text-sm">Overview</button>
+                <button onclick="switchTab('wins')" class="tab-btn text-sm">1. Performance Wins</button>
+                <button onclick="switchTab('improvements')" class="tab-btn text-sm">2. Live Improvements</button>
+                <button onclick="switchTab('opportunities')" class="tab-btn text-sm">3. Growth Gaps</button>
+                <button onclick="switchTab('action')" class="tab-btn text-sm">Action Roadmap</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-8 flex-grow">
+        <!-- TAB 1: OVERVIEW -->
+        <div id="overview" class="tab-content active space-y-8">
+            <div class="bg-white rounded-lg shadow-card p-6 border-l-4 border-wiser-red">
+                <h2 class="text-lg font-bold text-wiser-navy">Executive Summary</h2>
+                <p class="text-gray-600 mt-2 leading-relaxed">
+                    ${safeData.storeName} is delivering strong results, utilizing about <strong class="text-wiser-navy">${safeData.revenueCoverage}%</strong> of Wiser's revenue potential. 
+                    While high-intent pages are performing exceptionally well, there is a clear strategic path to adding another 
+                    <strong class="text-wiser-red">$5k-$8k/mo</strong> by optimizing under-performing live areas and activating missing high-traffic placements.
+                </p>
+            </div>
+            <div>
+                <h3 class="text-sm font-bold text-gray-500 uppercase mb-4 tracking-wider">Store Health Scorecard</h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="metric-card p-6 flex flex-col items-center">
+                        <h4 class="text-xs font-bold text-gray-400 mb-4 uppercase">Revenue Coverage</h4>
+                        <div class="chart-container" style="height: 160px; max-height: 160px;"><canvas id="healthRevenueChart"></canvas></div>
+                        <p class="text-3xl font-bold text-wiser-navy mt-[-60px] z-10">${safeData.revenueCoverage}%</p>
+                        <div class="mt-8 text-center w-full border-t border-gray-100 pt-4"><span class="inline-block px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-semibold rounded mb-1">Strong Core</span><p class="text-xs text-gray-500">Driven by Product Pages.</p></div>
+                    </div>
+                    <div class="metric-card p-6 flex flex-col items-center">
+                        <h4 class="text-xs font-bold text-gray-400 mb-4 uppercase">Funnel Coverage</h4>
+                        <div class="chart-container" style="height: 160px; max-height: 160px;"><canvas id="healthFunnelChart"></canvas></div>
+                        <p class="text-3xl font-bold text-wiser-navy mt-[-60px] z-10">${safeData.funnelCoverage}%</p>
+                        <div class="mt-8 text-center w-full border-t border-gray-100 pt-4"><span class="inline-block px-2 py-0.5 bg-yellow-50 text-yellow-700 text-xs font-semibold rounded mb-1">Mid-Funnel Gap</span><p class="text-xs text-gray-500">Collections/Search needed.</p></div>
+                    </div>
+                    <div class="metric-card p-6 flex flex-col items-center">
+                        <h4 class="text-xs font-bold text-gray-400 mb-4 uppercase">Widget Utilization</h4>
+                        <div class="chart-container" style="height: 160px; max-height: 160px;"><canvas id="healthWidgetChart"></canvas></div>
+                        <p class="text-3xl font-bold text-wiser-red mt-[-60px] z-10">${safeData.widgetUtilization}%</p>
+                        <div class="mt-8 text-center w-full border-t border-gray-100 pt-4"><span class="inline-block px-2 py-0.5 bg-red-50 text-red-700 text-xs font-semibold rounded mb-1">Critical Inactive</span><p class="text-xs text-gray-500">FBT & Bundles missing.</p></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 2: WINS -->
+        <div id="wins" class="tab-content space-y-6">
+            <div class="flex flex-col lg:flex-row gap-6">
+                <div class="flex-1">
+                    <div class="metric-card p-6">
+                        <h2 class="text-lg font-bold text-wiser-navy mb-1">Part 1: Best Performing Areas</h2>
+                        <div class="overflow-hidden border border-gray-200 rounded-lg mt-6">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr><th class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase">Page Type</th><th class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase">Revenue</th><th class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase">Status</th></tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-100">
+                                    <tr class="hover:bg-gray-50"><td class="px-6 py-3 text-sm font-medium text-gray-900">Product Page</td><td class="px-6 py-3 text-sm font-bold text-wiser-navy">$${safeData.productRev.toLocaleString(undefined, {minimumFractionDigits: 2})}</td><td class="px-6 py-3"><span class="px-2 py-1 text-xs font-bold rounded bg-green-100 text-green-800">Strong</span></td></tr>
+                                    <tr class="hover:bg-gray-50"><td class="px-6 py-3 text-sm font-medium text-gray-900">Post-Purchase</td><td class="px-6 py-3 text-sm font-bold text-wiser-navy">$${safeData.postPurchaseRev.toLocaleString(undefined, {minimumFractionDigits: 2})}</td><td class="px-6 py-3"><span class="px-2 py-1 text-xs font-bold rounded bg-green-100 text-green-800">Strong</span></td></tr>
+                                    <tr class="hover:bg-gray-50"><td class="px-6 py-3 text-sm font-medium text-gray-900">Checkout Page</td><td class="px-6 py-3 text-sm text-gray-500">$${safeData.checkoutRev.toLocaleString(undefined, {minimumFractionDigits: 2})}</td><td class="px-6 py-3"><span class="px-2 py-1 text-xs font-bold rounded bg-yellow-100 text-yellow-800">Moderate</span></td></tr>
+                                    <tr class="hover:bg-gray-50"><td class="px-6 py-3 text-sm font-medium text-gray-900">Thank You Page</td><td class="px-6 py-3 text-sm text-gray-500">$${safeData.thankYouRev.toLocaleString(undefined, {minimumFractionDigits: 2})}</td><td class="px-6 py-3"><span class="px-2 py-1 text-xs font-bold rounded bg-yellow-100 text-yellow-800">Moderate</span></td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="w-full lg:w-1/3 metric-card p-6 flex flex-col">
+                    <h3 class="text-xs font-bold text-gray-400 uppercase mb-4 text-center">Revenue Split</h3>
+                    <div class="chart-container flex-grow" style="height: 200px;"><canvas id="revenueByPageChart"></canvas></div>
+                </div>
+            </div>
+
+            <!-- Widgets Section -->
+            <div class="metric-card p-8">
+                <div class="flex justify-between items-center mb-6 border-b border-gray-100 pb-4">
+                    <h3 class="text-lg font-bold text-wiser-navy">Widget Performance Breakdown</h3>
+                    <span class="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">Total: $${safeData.totalRevenue.toLocaleString()}</span>
+                </div>
+                
+                <div class="flex flex-col lg:flex-row gap-10">
+                    <div class="w-full lg:w-3/5"><div class="chart-container"><canvas id="topWidgetsChart"></canvas></div></div>
+                    <div class="w-full lg:w-2/5 space-y-6">
+                        <div>
+                            <div class="flex justify-between items-end mb-1">
+                                <div><p class="text-xs text-wiser-red uppercase font-bold">Top Winner</p><p class="font-bold text-gray-800 text-base">${safeData.widget1Name}</p></div>
+                                <div class="text-right"><p class="text-base text-wiser-navy font-bold">$${safeData.widget1Rev.toLocaleString()}</p><p class="text-xs text-gray-500">${w1Pct}% of Total</p></div>
+                            </div>
+                            <div class="progress-bg"><div class="progress-fill bg-wiser-red" style="width: ${w1Pct}%"></div></div>
+                        </div>
+                        <div>
+                            <div class="flex justify-between items-end mb-1">
+                                <div><p class="text-xs text-wiser-navy uppercase font-bold">High Intent</p><p class="font-bold text-gray-800 text-base">${safeData.widget2Name}</p></div>
+                                <div class="text-right"><p class="text-base text-wiser-navy font-bold">$${safeData.widget2Rev.toLocaleString()}</p><p class="text-xs text-gray-500">${w2Pct}% of Total</p></div>
+                            </div>
+                            <div class="progress-bg"><div class="progress-fill bg-wiser-navy" style="width: ${w2Pct}%"></div></div>
+                        </div>
+                        <div>
+                            <div class="flex justify-between items-end mb-1">
+                                <div><p class="text-xs text-gray-400 uppercase font-bold">Social Proof</p><p class="font-bold text-gray-800 text-base">${safeData.widget3Name}</p></div>
+                                <div class="text-right"><p class="text-base text-wiser-navy font-bold">$${safeData.widget3Rev.toLocaleString()}</p><p class="text-xs text-gray-500">${w3Pct}% of Total</p></div>
+                            </div>
+                            <div class="progress-bg"><div class="progress-fill bg-gray-400" style="width: ${w3Pct}%"></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Other tabs (Improvements, Opportunities, Action) remain static structurally but dynamic values injected if needed -->
+        <div id="improvements" class="tab-content space-y-6">
+             <div class="bg-blue-50 p-4 rounded border border-blue-100 flex items-start">
+                <span class="text-blue-500 text-xl mr-3">TIP</span>
+                <div><h2 class="text-md font-bold text-blue-800">Optimization Opportunity</h2><p class="text-sm text-blue-700">These areas are live but under-monetized. Quick fixes here can drive a <strong class="underline">10-15% Revenue Lift</strong>.</p></div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <!-- Card 1 -->
+                <div class="metric-card flex flex-col p-0 overflow-hidden">
+                    <div class="bg-gray-50 p-4 border-b border-gray-100 flex justify-between items-center"><h3 class="font-bold text-md text-wiser-navy">Cart Page</h3><span class="text-xs font-bold text-wiser-yellow bg-yellow-50 px-2 py-1 rounded">Needs Focus</span></div>
+                    <div class="p-6 flex-grow"><p class="text-xs text-gray-400 uppercase font-bold mb-2">Strategy</p><p class="text-wiser-red font-bold text-lg mb-2">Better Placement</p><p class="text-sm text-gray-600">Move widgets <strong>above the fold</strong>. Visibility is key before checkout.</p><p class="text-xs text-gray-400 mt-4 pt-4 border-t border-gray-100">Current: $${safeData.cartRev.toLocaleString()}</p></div>
+                </div>
+                 <!-- Card 2 -->
+                <div class="metric-card flex flex-col p-0 overflow-hidden">
+                    <div class="bg-gray-50 p-4 border-b border-gray-100 flex justify-between items-center"><h3 class="font-bold text-md text-wiser-navy">Thank You Page</h3><span class="text-xs font-bold text-wiser-yellow bg-yellow-50 px-2 py-1 rounded">Needs Focus</span></div>
+                    <div class="p-6 flex-grow"><p class="text-xs text-gray-400 uppercase font-bold mb-2">Strategy</p><p class="text-wiser-red font-bold text-lg mb-2">Bundle Offers</p><p class="text-sm text-gray-600">Add <strong>multi-item recommendations</strong> to spark repeat purchases.</p><p class="text-xs text-gray-400 mt-4 pt-4 border-t border-gray-100">Current: $${safeData.thankYouRev.toLocaleString()}</p></div>
+                </div>
+                 <!-- Card 3 -->
+                <div class="metric-card flex flex-col p-0 overflow-hidden">
+                    <div class="bg-gray-50 p-4 border-b border-gray-100 flex justify-between items-center"><h3 class="font-bold text-md text-wiser-navy">Checkout Page</h3><span class="text-xs font-bold text-wiser-yellow bg-yellow-50 px-2 py-1 rounded">Needs Focus</span></div>
+                    <div class="p-6 flex-grow"><p class="text-xs text-gray-400 uppercase font-bold mb-2">Strategy</p><p class="text-wiser-red font-bold text-lg mb-2">Upsell Scaling</p><p class="text-sm text-gray-600">Increase <strong>offer value</strong>. Use logic to nudge AOV higher.</p><p class="text-xs text-gray-400 mt-4 pt-4 border-t border-gray-100">Current: $${safeData.checkoutRev.toLocaleString()}</p></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="opportunities" class="tab-content space-y-6">
+            <div class="bg-red-50 p-4 rounded border border-red-100 flex items-start">
+                <span class="text-wiser-red text-xl mr-3">GAP</span>
+                <div><h2 class="text-md font-bold text-red-800">Missed Opportunities (The Growth Gap)</h2><p class="text-sm text-red-700">Activating these high-traffic areas is the fastest way to unlock <strong class="underline">+15-25% Incremental Revenue</strong>.</p></div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div class="metric-card p-8">
+                    <h3 class="text-lg font-bold text-wiser-navy mb-6">Untapped High-Value Zones</h3>
+                    <ul class="space-y-6">
+                        <li class="flex items-start"><span class="flex-shrink-0 h-6 w-6 rounded bg-red-100 text-wiser-red flex items-center justify-center font-bold text-xs mt-1">0</span><div class="ml-4"><h4 class="text-sm font-bold text-wiser-navy">Cart Drawer & Collection Pages</h4><p class="text-sm text-gray-500 mt-1">Generating <strong>$0 Revenue</strong>. Essential for discovery.</p></div></li>
+                        <li class="flex items-start"><span class="flex-shrink-0 h-6 w-6 rounded bg-red-100 text-wiser-red flex items-center justify-center font-bold text-xs mt-1">0</span><div class="ml-4"><h4 class="text-sm font-bold text-wiser-navy">Search & Order Status Pages</h4><p class="text-sm text-gray-500 mt-1">Generating <strong>$0 Revenue</strong>. High-intent moments wasted.</p></div></li>
+                        <li class="flex items-start"><span class="flex-shrink-0 h-6 w-6 rounded bg-yellow-100 text-yellow-700 flex items-center justify-center font-bold text-xs mt-1">!</span><div class="ml-4"><h4 class="text-sm font-bold text-wiser-navy">Frequently Bought Together (FBT)</h4><p class="text-sm text-gray-500 mt-1"><strong>Not Live.</strong> Critical for AOV.</p></div></li>
+                    </ul>
+                </div>
+                <div class="metric-card p-6 flex flex-col">
+                    <h3 class="text-sm font-bold text-gray-500 uppercase mb-4">Revenue Potential Modeling</h3>
+                    <div class="chart-container flex-grow"><canvas id="projectionChart"></canvas></div>
+                    <div class="mt-4 text-center">
+                        <p class="text-gray-600 text-sm">Projected Monthly Lift</p>
+                        <p class="text-2xl font-bold text-wiser-green">+$5,000 - $8,000</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="action" class="tab-content space-y-6">
+             <div class="bg-white rounded-lg shadow-card border border-gray-200 overflow-hidden">
+                <div class="bg-wiser-navy p-8 text-white text-center">
+                    <h2 class="text-2xl font-bold">Strategic Roadmap</h2>
+                    <p class="text-gray-400 mt-2">Steps to move from "Growing" to "Optimized"</p>
+                </div>
+                <div class="p-8 max-w-4xl mx-auto space-y-6">
+                    <div class="flex items-center p-4 border border-gray-200 rounded-lg hover:border-wiser-red transition-colors group bg-gray-50">
+                        <div class="flex-shrink-0 h-10 w-10 bg-wiser-red rounded-full flex items-center justify-center font-bold text-white shadow-sm">1</div>
+                        <div class="ml-4 flex-grow"><h3 class="font-bold text-md text-wiser-navy">Unlock the "Growth Gap"</h3><p class="text-sm text-gray-500">Activate <strong>Cart Drawer</strong> & <strong>Collection Page</strong> widgets. Turn on FBT.</p></div>
+                        <div class="text-right"><span class="inline-block px-2 py-1 bg-green-100 text-green-800 text-xs font-bold rounded">+$5k/mo Impact</span></div>
+                    </div>
+                    <div class="flex items-center p-4 border border-gray-200 rounded-lg hover:border-wiser-navy transition-colors group bg-white">
+                        <div class="flex-shrink-0 h-10 w-10 bg-wiser-navy rounded-full flex items-center justify-center font-bold text-white shadow-sm">2</div>
+                        <div class="ml-4 flex-grow"><h3 class="font-bold text-md text-wiser-navy">Optimize Placements</h3><p class="text-sm text-gray-500">Move Cart widgets above fold. Add multi-item bundles to Thank You page.</p></div>
+                        <div class="text-right"><span class="inline-block px-2 py-1 bg-blue-100 text-blue-800 text-xs font-bold rounded">+15% Lift</span></div>
+                    </div>
+                    <div class="flex items-center p-4 border border-gray-200 rounded-lg hover:border-gray-400 transition-colors group bg-white">
+                        <div class="flex-shrink-0 h-10 w-10 bg-gray-200 text-gray-600 rounded-full flex items-center justify-center font-bold shadow-sm">3</div>
+                        <div class="ml-4 flex-grow"><h3 class="font-bold text-md text-wiser-navy">Monitor & Scale</h3><p class="text-sm text-gray-500">Review in 30 days. Scale Upsell offers based on data.</p></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="text-center text-gray-400 mt-12 mb-8 border-t border-gray-200 pt-8">
+        <p class="text-xs font-medium">Generated for ${safeData.storeName} | Wiser Performance Review</p>
+    </footer>
+
+    <!-- JavaScript Logic -->
+    <script>
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            const buttons = document.getElementsByTagName('button');
+            for (let btn of buttons) {
+                if (btn.getAttribute('onclick') === \`switchTab('\${tabId}')\`) {
+                    btn.classList.add('active');
+                    break;
+                }
+            }
+            const chartInstances = Chart.instances instanceof Map
+                ? Array.from(Chart.instances.values())
+                : Object.values(Chart.instances || {});
+            chartInstances.forEach(chart => chart.resize());
+        }
+
+        function wrapLabel(label) {
+            if (typeof label !== 'string' || label.length <= 16) return label;
+            const words = label.split(' ');
+            const lines = [];
+            let currentLine = words[0];
+            for (let i = 1; i < words.length; i++) {
+                if (currentLine.length + 1 + words[i].length <= 16) {
+                    currentLine += ' ' + words[i];
+                } else {
+                    lines.push(currentLine);
+                    currentLine = words[i];
+                }
+            }
+            lines.push(currentLine);
+            return lines;
+        }
+
+        const commonTooltipConfig = {
+            backgroundColor: '#1F2937', padding: 12, cornerRadius: 4,
+            titleFont: { family: 'Inter', size: 13, weight: 'bold' }, bodyFont: { family: 'Inter', size: 12 },
+            callbacks: {
+                title: function(tooltipItems) {
+                    const item = tooltipItems[0];
+                    let label = item.chart.data.labels[item.dataIndex];
+                    return Array.isArray(label) ? label.join(' ') : label;
+                }
+            }
+        };
+
+        // Inject Dynamic Variables into Chart.js
+        const revenueData = [${revenueDataLiteral}];
+        const widgetData = [${widgetDataLiteral}];
+        const widgetLabels = [${widgetLabelLiteral}];
+
+        const ctxRevenue = document.getElementById('revenueByPageChart').getContext('2d');
+        new Chart(ctxRevenue, {
+            type: 'doughnut',
+            data: {
+                labels: ['Product Page', 'Post-Purchase', 'Checkout', 'Thank You', 'Cart', 'Others'].map(wrapLabel),
+                datasets: [{ data: revenueData, backgroundColor: ['#F9423A', '#1F2937', '#6B7280', '#9CA3AF', '#D1D5DB', '#E5E7EB'], borderWidth: 2, borderColor: '#ffffff', hoverOffset: 4 }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, usePointStyle: true, font: {size: 11, family: 'Inter'} } }, tooltip: commonTooltipConfig } }
+        });
+
+        const ctxWidgets = document.getElementById('topWidgetsChart').getContext('2d');
+        new Chart(ctxWidgets, {
+            type: 'bar',
+            data: {
+                labels: widgetLabels.map(wrapLabel),
+                datasets: [{ label: 'Revenue ($)', data: widgetData, backgroundColor: ['#F9423A', '#1F2937', '#9CA3AF'], borderRadius: 4, barThickness: 35 }]
+            },
+            options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, scales: { x: { beginAtZero: true, grid: { display: false } }, y: { grid: { display: false }, ticks: { font: { family: 'Inter', weight: 500 } } } }, plugins: { legend: { display: false }, tooltip: commonTooltipConfig } }
+        });
+
+        function createGauge(id, score, color) {
+            new Chart(document.getElementById(id).getContext('2d'), {
+                type: 'doughnut',
+                data: { labels: ['Score', 'Gap'], datasets: [{ data: [score, 100 - score], backgroundColor: [color, '#E5E7EB'], borderWidth: 0, circumference: 180, rotation: 270, cutout: '85%' }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { enabled: false } } }
+            });
+        }
+        createGauge('healthRevenueChart', ${safeData.revenueCoverage}, '#1F2937');
+        createGauge('healthFunnelChart', ${safeData.funnelCoverage}, '#1F2937');
+        createGauge('healthWidgetChart', ${safeData.widgetUtilization}, '#F9423A');
+
+        new Chart(document.getElementById('projectionChart').getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels: ['Current Monthly', 'With Optimization'],
+                datasets: [{ label: 'Revenue Estimate', data: [${safeData.projectedCurrent}, ${safeData.projectedOptimized}], backgroundColor: ['#9CA3AF', '#008060'], borderRadius: 4, barPercentage: 0.6 }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, grid: { color: '#F3F4F6' } }, x: { grid: { display: false } } }, plugins: { legend: { display: false }, tooltip: commonTooltipConfig } }
+        });
+    </script>
+</body>
+</html>`;
+  }, [data]);
+
+  const downloadFile = () => {
+    const blob = new Blob([generateHTML], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeFileStoreName =
+      sanitizeText(data.storeName, 'Store')
+        .replace(/[^a-zA-Z0-9_-]+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '') || 'Store';
+    a.href = url;
+    a.download = `Wiser_Report_${safeFileStoreName}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // UI Component helper
+  const InputGroup = ({ label, name, type = "text", prefix }) => (
+    <div className="mb-4">
+      <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+      <div className="relative">
+        {prefix && <span className="absolute left-3 top-2 text-gray-500">{prefix}</span>}
+        <input
+          type={type}
+          name={name}
+          value={data[name]}
+          onChange={handleInputChange}
+          className={`w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:ring-red-500 focus:border-red-500 sm:text-sm ${prefix ? 'pl-8' : ''}`}
+        />
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="h-screen flex flex-col bg-gray-100 font-sans overflow-hidden">
+      {/* Top Navbar */}
+      <div className="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center shrink-0">
+        <div className="flex items-center space-x-3">
+          <div className="bg-red-500 p-2 rounded-md">
+            <LayoutTemplate className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-gray-900">Wiser Report Generator</h1>
+            <p className="text-xs text-gray-500">Create client performance dashboards instantly</p>
+          </div>
+        </div>
+        <button
+          onClick={downloadFile}
+          className="flex items-center space-x-2 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md font-medium text-sm transition-colors shadow-sm"
+        >
+          <Download className="w-4 h-4" />
+          <span>Download HTML Report</span>
+        </button>
+      </div>
+
+      {/* Main Workspace */}
+      <div className="flex-1 flex overflow-hidden">
+        
+        {/* LEFT PANEL - Editor Form */}
+        <div className="w-1/3 bg-white border-r border-gray-200 overflow-y-auto shrink-0 flex flex-col">
+          <div className="p-4 bg-gray-50 border-b border-gray-200 flex items-center text-gray-700 font-semibold text-sm uppercase tracking-wider">
+            <FileCode2 className="w-4 h-4 mr-2" /> Data Inputs
+          </div>
+          
+          <div className="p-6 space-y-8">
+            {/* AI Image Upload */}
+            <section className="bg-blue-50 p-4 rounded-lg border border-blue-100">
+              <h3 className="text-sm font-bold text-blue-900 mb-2 flex items-center">
+                <UploadCloud className="w-4 h-4 mr-2 text-blue-600" /> Auto-Fill via Image
+              </h3>
+              <p className="text-xs text-blue-700 mb-3">Upload a screenshot of your analytics dashboard. We'll extract the data automatically.</p>
+              
+              <input 
+                type="file" 
+                accept="image/*" 
+                onChange={handleImageUpload} 
+                ref={fileInputRef}
+                className="hidden" 
+                id="analytics-upload"
+              />
+              <label 
+                htmlFor="analytics-upload"
+                className={`flex items-center justify-center w-full px-4 py-2 text-sm font-medium rounded-md border border-blue-300 shadow-sm cursor-pointer transition-colors ${isAnalyzing ? 'bg-blue-200 text-blue-800' : 'bg-white text-blue-700 hover:bg-blue-100'}`}
+              >
+                {isAnalyzing ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Analyzing Image...</>
+                ) : (
+                  <><UploadCloud className="w-4 h-4 mr-2" /> Select Image</>
+                )}
+              </label>
+              {errorMsg && <p className="mt-2 text-xs text-red-600">{errorMsg}</p>}
+            </section>
+
+            {/* General Settings */}
+            <section>
+              <h3 className="text-md font-bold text-gray-900 mb-4 flex items-center border-b pb-2">
+                <LayoutDashboard className="w-4 h-4 mr-2 text-red-500" /> General Info
+              </h3>
+              <InputGroup label="Store Name" name="storeName" />
+              <InputGroup label="Optimization Coverage %" name="optimizationPercent" />
+              <InputGroup label="Total Revenue" name="totalRevenue" type="number" prefix="$" />
+            </section>
+
+            {/* Health Scores */}
+            <section>
+              <h3 className="text-md font-bold text-gray-900 mb-4 flex items-center border-b pb-2">
+                <Activity className="w-4 h-4 mr-2 text-red-500" /> Health Scores (0-100)
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                <InputGroup label="Revenue Coverage" name="revenueCoverage" type="number" />
+                <InputGroup label="Funnel Coverage" name="funnelCoverage" type="number" />
+                <InputGroup label="Widget Utilization" name="widgetUtilization" type="number" />
+              </div>
+            </section>
+
+            {/* Revenue By Page */}
+            <section>
+              <h3 className="text-md font-bold text-gray-900 mb-4 flex items-center border-b pb-2">
+                <DollarSign className="w-4 h-4 mr-2 text-red-500" /> Revenue By Page
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                <InputGroup label="Product Page" name="productRev" type="number" prefix="$" />
+                <InputGroup label="Post-Purchase" name="postPurchaseRev" type="number" prefix="$" />
+                <InputGroup label="Checkout" name="checkoutRev" type="number" prefix="$" />
+                <InputGroup label="Thank You" name="thankYouRev" type="number" prefix="$" />
+                <InputGroup label="Cart" name="cartRev" type="number" prefix="$" />
+                <InputGroup label="Other" name="otherRev" type="number" prefix="$" />
+              </div>
+            </section>
+
+            {/* Top Widgets */}
+            <section>
+              <h3 className="text-md font-bold text-gray-900 mb-4 flex items-center border-b pb-2">
+                <LayoutTemplate className="w-4 h-4 mr-2 text-red-500" /> Top Widgets
+              </h3>
+              <div className="bg-gray-50 p-4 rounded-md border border-gray-100 mb-4">
+                <InputGroup label="Widget 1 Name" name="widget1Name" />
+                <InputGroup label="Widget 1 Revenue" name="widget1Rev" type="number" prefix="$" />
+              </div>
+              <div className="bg-gray-50 p-4 rounded-md border border-gray-100 mb-4">
+                <InputGroup label="Widget 2 Name" name="widget2Name" />
+                <InputGroup label="Widget 2 Revenue" name="widget2Rev" type="number" prefix="$" />
+              </div>
+              <div className="bg-gray-50 p-4 rounded-md border border-gray-100">
+                <InputGroup label="Widget 3 Name" name="widget3Name" />
+                <InputGroup label="Widget 3 Revenue" name="widget3Rev" type="number" prefix="$" />
+              </div>
+            </section>
+
+            {/* Projections */}
+            <section>
+              <h3 className="text-md font-bold text-gray-900 mb-4 flex items-center border-b pb-2">
+                <Activity className="w-4 h-4 mr-2 text-red-500" /> Projections
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                <InputGroup label="Current Monthly" name="projectedCurrent" type="number" prefix="$" />
+                <InputGroup label="With Optimization" name="projectedOptimized" type="number" prefix="$" />
+              </div>
+            </section>
+          </div>
+        </div>
+
+        {/* RIGHT PANEL - Live Preview */}
+        <div className="flex-1 flex flex-col bg-gray-200 p-6 overflow-hidden relative">
+          <div className="absolute top-8 right-10 bg-gray-800 text-white text-xs px-3 py-1 rounded-full opacity-50 flex items-center pointer-events-none z-10">
+            <Eye className="w-3 h-3 mr-2" /> Live Preview
+          </div>
+          <div className="flex-1 bg-white rounded-xl shadow-lg border border-gray-300 overflow-hidden">
+             {/* Using an iframe to render the raw HTML exactly as it will be downloaded */}
+            <iframe 
+              srcDoc={generateHTML}
+              title="Report Preview"
+              className="w-full h-full border-none"
+              sandbox="allow-scripts"
+            />
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+};
+
+export default ReportGenerator;
+
+
