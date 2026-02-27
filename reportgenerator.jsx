@@ -211,7 +211,7 @@ const ReportGenerator = () => {
     postPurchaseRev: 5145.00,
     checkoutRev: 862.85,
     thankYouRev: 450.00,
-    cartRev: 149.00,
+    cartRev: 149.00, 
     otherRev: 265.24,
     
     // Top Widgets
